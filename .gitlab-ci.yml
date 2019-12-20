@@ -1,0 +1,84 @@
+stages:
+  - cleanup
+  - build
+  - staging
+  - production
+
+cleanup_job:
+  stage: cleanup
+  script:
+    - echo "Cleaning up"
+    - rm -rf "%CACHE_PATH%/%CI_PIPELINE_ID%"
+  when: always
+
+
+.deploy_temp: &deploy_template
+  image: harbor.dev.local/library/docker:stable
+  variables:
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+  services:
+    - name: harbor.dev.local/library/docker:stable-dind
+      alias: docker
+      command: ["--insecure-registry=harbor.dev.local"]
+  dependencies:
+    - build:app
+  before_script:
+    - chmod +x ./build.helpers/shield.sh
+    - ./build.helpers/shield.sh
+    - chmod +x ./build.helpers/build-image.sh
+    - ./build.helpers/build-image.sh
+    - echo ${HARBOR_REGISTRY_PASSWORD} | docker login -u ${HARBOR_REGISTRY_USER} --password-stdin harbor.dev.local
+    - chmod +x ./build.helpers/push-image.sh
+    - ./build.helpers/push-image.sh
+
+
+release:production:
+  <<: *deploy_template
+  stage: production
+  script:
+    - ssh -o StrictHostKeyChecking=no sysadm@10.100.60.83 'bash -s' < ./build.helpers/deploy.sh ${CI_PROJECT_NAME}
+  environment:
+    name: production
+    url: http://shield.dev.local
+  when: manual
+  only:
+    - master@shield/api
+    - tags
+
+release:staging:
+  <<: *deploy_template
+  stage: staging
+  script:
+      - echo ""
+  environment:
+    name: staging
+    url: http://stgshield.dev.local
+  when: manual
+  except:
+    - master@shield/api
+
+build:app:
+  image: harbor.dev.local/library/node:alpine-angular
+  stage: build
+  before_script:
+    - chmod +x ./build.helpers/shield.sh
+    - ./build.helpers/shield.sh
+    - yarn install
+    - yarn build
+    - chmod +x ./build.helpers/build-number.sh
+    - ./build.helpers/build-number.sh ${CI_PIPELINE_ID}
+  script:
+    - ls 
+  artifacts:
+    name: "$CI_PROJECT_NAME_Build_Outputs"
+    paths:
+      - dist
+      - node_modules
+      - package.json
+      - src/controllers/filterd_burpsuite_result.json
+    expire_in: 1 day
+  cache:
+    key: modules
+    paths:
+      - node_modules
